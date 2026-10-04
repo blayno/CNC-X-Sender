@@ -789,6 +789,11 @@ class CNCSender(QtWidgets.QMainWindow):
 
         self.job_start_time = None
         self.last_wco = None
+        
+        self.gcode_visual_offset = np.zeros(
+    3,
+    dtype=float
+)
 
         self.jog_buttons = []
         self.zero_buttons = []
@@ -797,10 +802,6 @@ class CNCSender(QtWidgets.QMainWindow):
 
         self.feed_override = 100
         self.spindle_override = 100
-
-        # Visualiser Z offset used to keep the live tool aligned
-        # with the displayed G-code toolpath.
-        self.visual_z_offset = 0.0
 
         self._build_ui()
 
@@ -2288,14 +2289,14 @@ class CNCSender(QtWidgets.QMainWindow):
         # -----------------------------------------------------
 
         self.cut_3d = gl.GLLinePlotItem(
-            color=(0.0, 0.85, 1.0, 1.0),
+            color=(0.0, 1.0, 1.0, 1.0),
             width=2,
             antialias=True,
             mode="lines"
         )
 
         self.rapid_3d = gl.GLLinePlotItem(
-            color=(1.0, 0.85, 0.0, 1.0),
+            color=(1.0, 0.0, 0.0, 1.0),
             width=1,
             antialias=True,
             mode="lines"
@@ -3743,26 +3744,25 @@ class CNCSender(QtWidgets.QMainWindow):
 
     def update_tool_position(self, x, y, z):
 
-        self.dro_x_value.setText(
-            f"{x:.3f}"
-        )
+        # DRO always shows the real machine/work coordinates.
+        self.dro_x_value.setText(f"{x:.3f}")
+        self.dro_y_value.setText(f"{y:.3f}")
+        self.dro_z_value.setText(f"{z:.3f}")
 
-        self.dro_y_value.setText(
-            f"{y:.3f}"
-        )
-
-        self.dro_z_value.setText(
-            f"{z:.3f}"
-        )
-
-        # Apply the exact same visual Z offset used by the displayed G-code.
-        visual_z = z + self.visual_z_offset
-
-        self.tool_3d.setData(
-            pos=np.array(
-                [[x, y, visual_z]],
+        # Apply the same visual offset used by the G-code
+        # toolpath so the live red tool position stays
+        # directly on the visualised toolpath.
+        visual_position = (
+            np.array(
+                [[x, y, z]],
                 dtype=float
             )
+            +
+            self.gcode_visual_offset
+        )
+
+        self.tool_3d.setData(
+            pos=visual_position
         )
 
     # =========================================================
@@ -4206,6 +4206,26 @@ class CNCSender(QtWidgets.QMainWindow):
         self.cut_points_3d = []
         self.rapid_points_3d = []
 
+        # Reset visual offset
+        self.rapid_3d.setData(
+            pos=np.empty(
+                (0, 3),
+                dtype=float
+            )
+        )
+
+        self.gcode_visual_offset = np.zeros(
+            3,
+            dtype=float
+        )
+
+        self.tool_3d.setData(
+            pos=np.array(
+                [[0, 0, 0]],
+                dtype=float
+            )
+        )
+
         # -----------------------------------------------------
         # MODAL STATE
         # -----------------------------------------------------
@@ -4524,33 +4544,20 @@ class CNCSender(QtWidgets.QMainWindow):
             # MOTION MODE
             # -------------------------------------------------
 
-            if re.search(
-                r"(?<![A-Z0-9])G0{1,2}(?![A-Z0-9])",
+            # G-code words may be written with or without spaces, e.g.
+            # G1 X10, G1X10, G01 X10 or G01X10.
+            # The previous pattern required a non-letter after the G-code,
+            # so normal forms such as G1X10 were not detected and the
+            # previous G0 modal state remained active. That made the whole
+            # toolpath get classified as RAPID.
+            motion_match = re.search(
+                r"(?<![A-Z0-9])G0*([0-3])(?=$|\s|[XYZIJKF])",
                 upper
-            ):
+            )
 
-                motion = "G0"
+            if motion_match:
 
-            elif re.search(
-                r"(?<![A-Z0-9])G0*1(?![A-Z0-9])",
-                upper
-            ):
-
-                motion = "G1"
-
-            elif re.search(
-                r"(?<![A-Z0-9])G0*2(?![A-Z0-9])",
-                upper
-            ):
-
-                motion = "G2"
-
-            elif re.search(
-                r"(?<![A-Z0-9])G0*3(?![A-Z0-9])",
-                upper
-            ):
-
-                motion = "G3"
+                motion = "G" + motion_match.group(1)
 
             # -------------------------------------------------
             # SPINDLE COMMANDS
@@ -4803,6 +4810,10 @@ class CNCSender(QtWidgets.QMainWindow):
         # CONVERT TO NUMPY
         # =====================================================
 
+# =====================================================
+# CONVERT TO NUMPY
+# =====================================================
+
         if self.cut_points_3d:
 
             self.cut_points_3d = np.asarray(
@@ -4831,39 +4842,65 @@ class CNCSender(QtWidgets.QMainWindow):
                 dtype=float
             )
 
+
         # =====================================================
         # NORMALISE TOOLPATH TO GRID Z=0
         #
-        # Keep the same visual Z offset for the live tool marker.
-        # This only changes the 3D display, not the G-code sent
-        # to the machine or the DRO values.
+        # The grid represents the work surface.
+        # The highest toolpath point is placed at Z=0.
+        #
+        # This prevents the cutting path from appearing
+        # below the grid when the G-code contains negative Z.
         # =====================================================
-
-        self.visual_z_offset = 0.0
 
         all_toolpath_points = []
 
         if len(self.cut_points_3d) > 0:
-            all_toolpath_points.append(self.cut_points_3d)
+
+            all_toolpath_points.append(
+                self.cut_points_3d
+            )
 
         if len(self.rapid_points_3d) > 0:
-            all_toolpath_points.append(self.rapid_points_3d)
+
+            all_toolpath_points.append(
+                self.rapid_points_3d
+            )
 
         if all_toolpath_points:
 
-            all_points = np.vstack(all_toolpath_points)
+            all_points = np.vstack(
+                all_toolpath_points
+            )
 
             valid_points = all_points[
-                np.all(np.isfinite(all_points), axis=1)
+                np.all(
+                    np.isfinite(all_points),
+                    axis=1
+                )
             ]
 
             if len(valid_points) > 0:
 
-                z_offset = np.max(valid_points[:, 2])
-                self.visual_z_offset = z_offset
+                # Highest Z becomes the grid surface.
+                z_offset = np.max(
+                    valid_points[:, 2]
+                )
 
-                self.cut_points_3d[:, 2] += self.visual_z_offset
-                self.rapid_points_3d[:, 2] += self.visual_z_offset
+                # Store the exact offset applied to the G-code
+                # so the live tool position can use the same
+                # visual coordinate system.
+                self.gcode_visual_offset = np.array(
+                    [
+                        0.0,
+                        0.0,
+                        z_offset
+                    ],
+                    dtype=float
+                )
+
+                self.cut_points_3d += self.gcode_visual_offset
+                self.rapid_points_3d += self.gcode_visual_offset
 
         # =====================================================
         # UPDATE OPENGL CUT PATH
@@ -4875,6 +4912,9 @@ class CNCSender(QtWidgets.QMainWindow):
 
             self.cut_3d.setData(
                 pos=self.cut_points_3d,
+                color=(0.0, 1.0, 1.0, 1.0),
+                width=2,
+                antialias=True,
                 mode="lines"
             )
 
@@ -4885,6 +4925,9 @@ class CNCSender(QtWidgets.QMainWindow):
                     (0, 3),
                     dtype=float
                 ),
+                color=(0.0, 1.0, 1.0, 1.0),
+                width=2,
+                antialias=True,
                 mode="lines"
             )
 
@@ -4898,6 +4941,9 @@ class CNCSender(QtWidgets.QMainWindow):
 
             self.rapid_3d.setData(
                 pos=self.rapid_points_3d,
+                color=(1.0, 0.0, 0.0, 1.0),
+                width=1,
+                antialias=True,
                 mode="lines"
             )
 
@@ -4908,6 +4954,9 @@ class CNCSender(QtWidgets.QMainWindow):
                     (0, 3),
                     dtype=float
                 ),
+                color=(1.0, 0.0, 0.0, 1.0),
+                width=1,
+                antialias=True,
                 mode="lines"
             )
 
@@ -4917,7 +4966,7 @@ class CNCSender(QtWidgets.QMainWindow):
 
         self.tool_3d.setData(
             pos=np.array(
-                [[0.0, 0.0, self.visual_z_offset]],
+                [[0.0, 0.0, 0.0]],
                 dtype=float
             )
         )
@@ -5130,8 +5179,6 @@ class CNCSender(QtWidgets.QMainWindow):
 
     def clear_visualiser(self):
 
-        self.visual_z_offset = 0.0
-
         self.cut_points_3d = np.empty(
             (0, 3),
             dtype=float
@@ -5157,9 +5204,13 @@ class CNCSender(QtWidgets.QMainWindow):
         )
 
         self.tool_3d.setData(
-            pos=np.array(
-                [[0, 0, 0]],
-                dtype=float
+            pos=(
+                np.array(
+                    [[0.0, 0.0, 0.0]],
+                    dtype=float
+                )
+                +
+                self.gcode_visual_offset
             )
         )
 
