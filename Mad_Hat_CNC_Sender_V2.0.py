@@ -3197,13 +3197,19 @@ class CNCSender(QtWidgets.QMainWindow):
         if not self.ser:
             return
 
+        if (
+            not self.sender
+            or
+            not self.sender.isRunning()
+        ):
+            return
+
         answer = QtWidgets.QMessageBox.warning(
             self,
             "Stop Job",
             "STOP the current CNC job?\n\n"
-            "The machine will be stopped and "
-            "the current job will not resume "
-            "from the same line.",
+            "The current job will be aborted and "
+            "cannot be resumed from the same line.",
             QtWidgets.QMessageBox.Yes |
             QtWidgets.QMessageBox.No
         )
@@ -3211,33 +3217,119 @@ class CNCSender(QtWidgets.QMainWindow):
         if answer != QtWidgets.QMessageBox.Yes:
             return
 
+        self.log(
+            "STOPPING JOB..."
+        )
+
+        # -----------------------------------------------------
+        # Tell the sender thread to stop sending immediately.
+        # -----------------------------------------------------
+
+        if self.sender:
+
+            self.sender.stop()
+
+        # -----------------------------------------------------
+        # Send GRBL SOFT RESET / ABORT.
+        #
+        # Ctrl-X is a GRBL realtime command and immediately
+        # aborts the current motion and clears the planner.
+        #
+        # This is intentionally NOT:
+        #
+        #     !
+        #     M5
+        #
+        # because "!" only puts GRBL into HOLD and M5 is a
+        # buffered G-code command which may sit behind moves
+        # already in the planner.
+        # -----------------------------------------------------
+
         try:
 
             self.ser.write(
-                b"!"
+                b"\x18"
             )
 
-            time.sleep(
-                0.05
+            self.ser.flush()
+
+        except Exception as e:
+
+            self.log(
+                f"STOP RESET ERROR: {e}"
             )
 
-            self.ser.write(
-                b"M5\n"
-            )
-
-        except Exception:
-            pass
+        # -----------------------------------------------------
+        # Wait for the Python sender thread to completely exit.
+        # This prevents a new job from starting while the old
+        # sender is still alive.
+        # -----------------------------------------------------
 
         if self.sender:
-            self.sender.stop()
+
+            if not self.sender.wait(1500):
+
+                self.log(
+                    "WARNING: SENDER THREAD DID NOT EXIT CLEANLY"
+                )
+
+        # -----------------------------------------------------
+        # Reset local job state.
+        # -----------------------------------------------------
+
+        self.is_paused = False
+
+        self.progress_timer.stop()
 
         self.stop_btn.setEnabled(
             False
         )
 
-        self.log(
-            "STOP REQUESTED"
+        self.pause_btn.setEnabled(
+            False
         )
+
+        self.resume_btn.setEnabled(
+            False
+        )
+
+        self.eta_label.setText(
+            "ETA --:--:--"
+        )
+
+        # -----------------------------------------------------
+        # Clear anything GRBL returned during the reset.
+        # -----------------------------------------------------
+
+        try:
+
+            self.ser.reset_input_buffer()
+
+        except Exception:
+            pass
+
+        # -----------------------------------------------------
+        # Restart normal status polling.
+        # -----------------------------------------------------
+
+        if self.ser and self.ser.is_open:
+
+            self.status_timer.start(
+                100
+            )
+
+            # Give GRBL a moment after reset, then request
+            # a fresh status.
+            QtCore.QTimer.singleShot(
+                250,
+                self.request_status
+            )
+
+        self.log(
+            "JOB ABORTED / GRBL RESET"
+        )
+
+        self.update_button_state()
 
     # =========================================================
     # SOFT RESET
@@ -3261,11 +3353,25 @@ class CNCSender(QtWidgets.QMainWindow):
         if answer != QtWidgets.QMessageBox.Yes:
             return
 
+        # -----------------------------------------------------
+        # Stop Python sender first.
+        # -----------------------------------------------------
+
+        if self.sender:
+
+            self.sender.stop()
+
+        # -----------------------------------------------------
+        # Send GRBL realtime soft reset.
+        # -----------------------------------------------------
+
         try:
 
             self.ser.write(
                 b"\x18"
             )
+
+            self.ser.flush()
 
             self.log(
                 "GRBL SOFT RESET SENT"
@@ -3277,8 +3383,47 @@ class CNCSender(QtWidgets.QMainWindow):
                 f"RESET ERROR: {e}"
             )
 
+        # -----------------------------------------------------
+        # Wait for sender thread to exit.
+        # -----------------------------------------------------
+
         if self.sender:
-            self.sender.stop()
+
+            self.sender.wait(
+                1500
+            )
+
+        self.is_paused = False
+
+        self.progress_timer.stop()
+
+        # -----------------------------------------------------
+        # Clear reset/startup responses.
+        # -----------------------------------------------------
+
+        try:
+
+            self.ser.reset_input_buffer()
+
+        except Exception:
+            pass
+
+        # -----------------------------------------------------
+        # Return to normal status polling.
+        # -----------------------------------------------------
+
+        if self.ser and self.ser.is_open:
+
+            self.status_timer.start(
+                100
+            )
+
+            QtCore.QTimer.singleShot(
+                250,
+                self.request_status
+            )
+
+        self.update_button_state()
 
     # =========================================================
     # CHECK GCODE
@@ -3413,15 +3558,25 @@ class CNCSender(QtWidgets.QMainWindow):
             False
         )
 
+        self.pause_btn.setEnabled(
+            False
+        )
+
         self.resume_btn.setEnabled(
             False
         )
 
         self.is_paused = False
 
-        if self.ser:
+        if self.ser and self.ser.is_open:
+
             self.status_timer.start(
                 100
+            )
+
+            QtCore.QTimer.singleShot(
+                250,
+                self.request_status
             )
 
         self.update_button_state()
@@ -3438,6 +3593,8 @@ class CNCSender(QtWidgets.QMainWindow):
 
         if self.sender:
 
+            # The QThread has finished at this point.
+            # deleteLater() allows Qt to safely destroy it.
             self.sender.deleteLater()
 
             self.sender = None
@@ -5276,22 +5433,16 @@ class CNCSender(QtWidgets.QMainWindow):
 
             try:
 
-                self.ser.write(
-                    b"!"
-                )
-
-                time.sleep(
-                    0.05
-                )
+                self.sender.stop()
 
                 self.ser.write(
-                    b"M5\n"
+                    b"\x18"
                 )
+
+                self.ser.flush()
 
             except Exception:
                 pass
-
-            self.sender.stop()
 
             self.sender.wait(
                 2000
