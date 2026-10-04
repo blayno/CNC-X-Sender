@@ -2,10 +2,10 @@
 
 
 This is an experimental Gcode sender written mostly with Chat GPT 
-IMPORTANT DISCLAIMER: This is my personal project and has only been tested by me on my neje master 2s plus running grbl 1.1f
- If you choose to run it, you do so entirely at your own risk. 
+IMPORTANT DISCLAIMER: This is my personal project and has only been tested by me
+If you choose to run it, you do so entirely at your own risk. 
 I am not responsible for any damage, malfunction, or personal injury that may result from the use or misuse of Laser X Sender.
- Use it with caution and at your own discretion.
+Use it with caution and at your own discretion.
 
 Python 3.8+ (3.9 or 3.10 recommended)
 
@@ -14,6 +14,8 @@ pip install PyQt5
 pip install pyqtgraph
 
 pip install pyserial
+
+pip install pyopengl
 
 
 
